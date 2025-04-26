@@ -48,10 +48,15 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.annotation.RequiresPermission
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontStyle
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.*
+
 
 class MainActivity : ComponentActivity() {
     // Create an instance of the BLEScannerLogic class
@@ -78,25 +83,6 @@ class MainActivity : ComponentActivity() {
         scanJob?.cancel()
         attendanceJob?.cancel()
     }
-
-    // Handle attendance marking in background
-    private fun markAttendanceInBackground(
-        subject: String,
-        studentName: String,
-        rollNumber: String,
-        onComplete: (Boolean) -> Unit
-    ) {
-        attendanceJob?.cancel()
-        attendanceJob = lifecycleScope.launch {
-            try {
-                val success = bleLogic.markAttendanceAsync(subject, studentName, rollNumber)
-                onComplete(success)
-            } catch (e: Exception) {
-                Log.e("Attendance", "Error marking attendance", e)
-                onComplete(false)
-            }
-        }
-    }
 }
 
 @RequiresApi(Build.VERSION_CODES.O)
@@ -106,11 +92,12 @@ fun BLEScannerApp(bleLogic: BLEScannerLogic) {
     var hasPermissions by remember { mutableStateOf(false) }
     var studentName by remember { mutableStateOf("Alex Johnson") }
     var rollNumber by remember { mutableStateOf("20230045") }
-    var showConfirmationDialog by remember { mutableStateOf(false) }
+    var showAttendanceDialog by remember { mutableStateOf(false) }
     var detectedSubject by remember { mutableStateOf("") }
     var scanResults by remember { mutableStateOf<List<BLEScannerLogic.ScanResultWithText>>(emptyList()) }
     var isAttendanceMarked by remember { mutableStateOf(false) }
     var isMarkingAttendance by remember { mutableStateOf(false) }
+    var showConfetti by remember { mutableStateOf(false) }
 
     // Coroutine scope for this composable
     val coroutineScope = rememberCoroutineScope()
@@ -126,6 +113,25 @@ fun BLEScannerApp(bleLogic: BLEScannerLogic) {
         ),
         label = "pulseAnimation"
     )
+
+    // Success animation after attendance is marked
+    val successScale by animateFloatAsState(
+        targetValue = if (isAttendanceMarked) 1f else 0f,
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessLow
+        ),
+        label = "successAnimation"
+    )
+
+    // Trigger confetti when attendance is marked
+    LaunchedEffect(isAttendanceMarked) {
+        if (isAttendanceMarked) {
+            showConfetti = true
+            delay(3000) // Show confetti for 3 seconds
+            showConfetti = false
+        }
+    }
 
     // Permission launcher
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -192,9 +198,9 @@ fun BLEScannerApp(bleLogic: BLEScannerLogic) {
                         processedResult.message.isNotBlank() &&
                         !isAttendanceMarked &&
                         !isMarkingAttendance &&
-                        !showConfirmationDialog) {
+                        !showAttendanceDialog) {
                         detectedSubject = processedResult.message
-                        showConfirmationDialog = true
+                        showAttendanceDialog = true
                     }
                 }
             }
@@ -213,6 +219,9 @@ fun BLEScannerApp(bleLogic: BLEScannerLogic) {
                     )
                 )
             )) {
+        // Confetti animation overlay
+        SuccessConfetti(isActive = showConfetti)
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -259,7 +268,7 @@ fun BLEScannerApp(bleLogic: BLEScannerLogic) {
                 pulse = pulse
             )
 
-            // Student info section with elegant design
+            // Student info card with elegant design
             StudentInfoCard(
                 studentName = studentName,
                 rollNumber = rollNumber,
@@ -270,40 +279,35 @@ fun BLEScannerApp(bleLogic: BLEScannerLogic) {
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Reset button with refined animation
-            AnimatedVisibility(
-                visible = isAttendanceMarked,
-                enter = scaleIn(tween(300, easing = EaseOutQuart)) + fadeIn(tween(300)),
-                exit = scaleOut() + fadeOut()
+            // Reset button always present (no AnimatedVisibility)
+            Button(
+                onClick = {
+                    isAttendanceMarked = false
+                    showConfetti = false
+                    bleLogic.clearDetectedDevices()
+                    scanResults = emptyList()
+                },
+                modifier = Modifier
+                    .width(240.dp)
+                    .height(44.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isAttendanceMarked) Color(0xFF0D47A1) else Color(0xFF424242),
+                    contentColor = Color.White
+                ),
+                shape = RoundedCornerShape(8.dp),
+                elevation = ButtonDefaults.buttonElevation(
+                    defaultElevation = 4.dp,
+                    pressedElevation = 2.dp
+                )
             ) {
-                Button(
-                    onClick = {
-                        isAttendanceMarked = false
-                        bleLogic.clearDetectedDevices()
-                        scanResults = emptyList()
-                    },
-                    modifier = Modifier
-                        .width(240.dp)
-                        .height(44.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF0D47A1),
-                        contentColor = Color.White
-                    ),
-                    shape = RoundedCornerShape(8.dp),
-                    elevation = ButtonDefaults.buttonElevation(
-                        defaultElevation = 4.dp,
-                        pressedElevation = 2.dp
-                    )
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Refresh,
-                        contentDescription = "Reset",
-                        modifier = Modifier.padding(end = 8.dp))
-                    Text(
-                        text = "Reset for Next Session",
-                        fontWeight = FontWeight.Medium
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = "Reset",
+                    modifier = Modifier.padding(end = 8.dp))
+                Text(
+                    text = if (isAttendanceMarked) "Reset for Next Session" else "Reset Scanner",
+                    fontWeight = FontWeight.Medium
+                )
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -320,21 +324,21 @@ fun BLEScannerApp(bleLogic: BLEScannerLogic) {
             )
         }
 
-        // Confirmation dialog with improved responsiveness
-        if (showConfirmationDialog) {
-            AttendanceConfirmationDialog(
+        // Auto attendance dialog - no confirmation needed
+        if (showAttendanceDialog) {
+            AutoAttendanceDialog(
                 subject = detectedSubject,
                 studentName = studentName,
                 rollNumber = rollNumber,
                 onDismiss = {
-                    showConfirmationDialog = false
+                    showAttendanceDialog = false
                 },
-                onConfirm = {
-                    showConfirmationDialog = false
-                    isMarkingAttendance = true
+                onComplete = {
+                    showAttendanceDialog = false
 
-                    // Use coroutineScope to handle attendance marking
+                    // Mark attendance automatically in the background
                     coroutineScope.launch {
+                        isMarkingAttendance = true
                         try {
                             val success = bleLogic.markAttendanceAsync(detectedSubject, studentName, rollNumber)
                             if (success) {
@@ -351,69 +355,6 @@ fun BLEScannerApp(bleLogic: BLEScannerLogic) {
                     }
                 }
             )
-        }
-    }
-}
-
-@Composable
-fun StatusCard(isAttendanceMarked: Boolean, isMarkingAttendance: Boolean, pulse: Float) {
-    AnimatedVisibility(
-        visible = true,
-        enter = fadeIn(tween(500)) + expandVertically(tween(500, easing = EaseOutQuart)),
-        exit = fadeOut() + shrinkVertically()
-    ) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 16.dp)
-                .scale(if (isMarkingAttendance) pulse else 1f),
-            colors = CardDefaults.cardColors(
-                containerColor = when {
-                    isAttendanceMarked -> Color(0xFF2E7D32).copy(alpha = 0.9f)
-                    isMarkingAttendance -> Color(0xFFFFA000).copy(alpha = 0.9f)
-                    else -> Color(0xFF0D47A1).copy(alpha = 0.9f)
-                }
-            ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Icon(
-                    imageVector = when {
-                        isAttendanceMarked -> Icons.Default.CheckCircle
-                        isMarkingAttendance -> Icons.Default.Refresh
-                        else -> Icons.Default.Schedule
-                    },
-                    contentDescription = "Status",
-                    tint = Color.White,
-                    modifier = Modifier.size(28.dp))
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = when {
-                        isAttendanceMarked -> "Attendance Recorded"
-                        isMarkingAttendance -> "Recording Attendance..."
-                        else -> "Awaiting Class Signal"
-                    },
-                    fontWeight = FontWeight.Medium,
-                    fontSize = 18.sp,
-                    color = Color.White
-                )
-
-                if (!isAttendanceMarked && !isMarkingAttendance) {
-                    Text(
-                        text = "Please ensure Bluetooth is activated and you are within proximity of the classroom",
-                        fontSize = 14.sp,
-                        color = Color.White.copy(alpha = 0.9f),
-                        modifier = Modifier.padding(top = 4.dp),
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
         }
     }
 }
@@ -865,5 +806,328 @@ fun InfoRow(icon: ImageVector, label: String, value: String) {
             fontSize = 13.sp,
             fontWeight = FontWeight.Medium
         )
+    }
+}
+
+
+@Composable
+fun AutoAttendanceDialog(
+    subject: String,
+    studentName: String,
+    rollNumber: String,
+    onDismiss: () -> Unit,
+    onComplete: () -> Unit
+) {
+    // State to track animation progress
+    var animationState by remember { mutableStateOf(0) }
+
+    // Animation timing
+    val totalDuration = 3000 // 3 seconds total
+
+    // Animation values
+    val checkScale by animateFloatAsState(
+        targetValue = if (animationState >= 1) 1f else 0f,
+        animationSpec = tween(durationMillis = 500, easing = EaseOutBack),
+        label = "checkScale"
+    )
+
+    val circleScale by animateFloatAsState(
+        targetValue = if (animationState >= 1) 1f else 0f,
+        animationSpec = tween(durationMillis = 700, easing = EaseOutBack),
+        label = "circleScale"
+    )
+
+    val successAlpha by animateFloatAsState(
+        targetValue = if (animationState >= 2) 1f else 0f,
+        animationSpec = tween(durationMillis = 500),
+        label = "successAlpha"
+    )
+
+    val contentAlpha by animateFloatAsState(
+        targetValue = if (animationState == 0) 1f else 0f,
+        animationSpec = tween(durationMillis = 300),
+        label = "contentAlpha"
+    )
+
+    // Auto start the animation sequence
+    LaunchedEffect(Unit) {
+        // First show the dialog content
+        delay(500)
+
+        // Then start the confirmation animation
+        animationState = 1
+        delay(1500)
+
+        // Then show the success message
+        animationState = 2
+        delay(1000)
+
+        // Then dismiss and call onComplete
+        onComplete()
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier
+                .width(320.dp)
+                .wrapContentHeight(),
+            shape = RoundedCornerShape(12.dp),
+            color = Color.White
+        ) {
+            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                // Initial content - fades out during animation
+                Column(
+                    modifier = Modifier
+                        .padding(24.dp)
+                        .alpha(contentAlpha),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Class,
+                        contentDescription = "Class",
+                        tint = Color(0xFF1A2151),
+                        modifier = Modifier.size(40.dp)
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Text(
+                        text = "Class Session Detected",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = Color(0xFF1A2151)
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Class info card
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFFF5F5F5)
+                        ),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp)
+                        ) {
+                            InfoRow(icon = Icons.Default.Book, label = "Course:", value = subject)
+                            InfoRow(icon = Icons.Default.Person, label = "Student:", value = studentName)
+                            InfoRow(icon = Icons.Default.Numbers, label = "ID:", value = rollNumber)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    Text(
+                        text = "Marking attendance automatically...",
+                        fontSize = 15.sp,
+                        color = Color.DarkGray,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                // Success animation that appears after content fades
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(300.dp)
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    // Background circle
+                    Box(
+                        modifier = Modifier
+                            .size(120.dp)
+                            .scale(circleScale)
+                            .background(
+                                color = Color(0xFF43A047).copy(alpha = 0.2f),
+                                shape = CircleShape
+                            )
+                    )
+
+                    // Checkmark
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = "Success",
+                        tint = Color(0xFF43A047),
+                        modifier = Modifier
+                            .size(80.dp)
+                            .scale(checkScale)
+                    )
+
+                    // Success text
+                    Text(
+                        text = "Attendance Marked!",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = Color(0xFF43A047),
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 16.dp)
+                            .alpha(successAlpha)
+                    )
+                }
+            }
+        }
+    }
+}
+
+
+@Composable
+fun StatusCard(isAttendanceMarked: Boolean, isMarkingAttendance: Boolean, pulse: Float) {
+    // Animations for success state
+    val successScale = remember { Animatable(0f) }
+    val checkmarkScale = remember { Animatable(0f) }
+    val cardColor = remember { Animatable(Color(0xFF0D47A1).copy(alpha = 0.9f).toArgb().toFloat()) }
+
+    // Launch success animation when attendance is marked
+    LaunchedEffect(isAttendanceMarked) {
+        if (isAttendanceMarked) {
+            // Animate card color change
+            cardColor.animateTo(
+                Color(0xFF2E7D32).copy(alpha = 0.9f).toArgb().toFloat(),
+                animationSpec = tween(500, easing = EaseOutCubic)
+            )
+
+            // Animate checkmark appearing with bounce effect
+            successScale.animateTo(
+                1.2f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessLow
+                )
+            )
+            successScale.animateTo(
+                1f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMedium
+                )
+            )
+
+            // Animate checkmark with slight delay
+            delay(200)
+            checkmarkScale.animateTo(
+                1.2f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioMediumBouncy,
+                    stiffness = Spring.StiffnessLow
+                )
+            )
+            checkmarkScale.animateTo(
+                1f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMedium
+                )
+            )
+        }
+    }
+
+    AnimatedVisibility(
+        visible = true,
+        enter = fadeIn(tween(500)) + expandVertically(tween(500, easing = EaseOutQuart)),
+        exit = fadeOut() + shrinkVertically()
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp)
+                .scale(
+                    when {
+                        isAttendanceMarked -> successScale.value
+                        isMarkingAttendance -> pulse
+                        else -> 1f
+                    }
+                ),
+            colors = CardDefaults.cardColors(
+                containerColor = Color(cardColor.value.toInt())
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    // Show appropriate icon based on state
+                    when {
+                        isAttendanceMarked -> {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = "Attendance Marked",
+                                tint = Color.White,
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .scale(checkmarkScale.value)
+                            )
+                        }
+                        isMarkingAttendance -> {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Marking Attendance",
+                                tint = Color.White,
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .rotate(pulse * 360) // Rotate icon during marking
+                            )
+                        }
+                        else -> {
+                            Icon(
+                                imageVector = Icons.Default.Schedule,
+                                contentDescription = "Awaiting Signal",
+                                tint = Color.White,
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = when {
+                        isAttendanceMarked -> "Attendance Recorded"
+                        isMarkingAttendance -> "Recording Attendance..."
+                        else -> "Awaiting Class Signal"
+                    },
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 18.sp,
+                    color = Color.White,
+                    textAlign = TextAlign.Center
+                )
+
+                if (isAttendanceMarked) {
+                    // Show success message with animation
+                    AnimatedVisibility(
+                        visible = true,
+                        enter = expandVertically(
+                            animationSpec = spring(
+                                dampingRatio = Spring.DampingRatioMediumBouncy,
+                                stiffness = Spring.StiffnessLow
+                            )
+                        ) + fadeIn(tween(500))
+                    ) {
+                        Text(
+                            text = "Your attendance has been successfully recorded",
+                            fontSize = 14.sp,
+                            color = Color.White.copy(alpha = 0.9f),
+                            modifier = Modifier.padding(top = 4.dp),
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                } else if (!isMarkingAttendance) {
+                    Text(
+                        text = "Please ensure Bluetooth is activated and you are within proximity of the classroom",
+                        fontSize = 14.sp,
+                        color = Color.White.copy(alpha = 0.9f),
+                        modifier = Modifier.padding(top = 4.dp),
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
     }
 }
