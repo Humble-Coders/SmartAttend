@@ -13,6 +13,7 @@ import android.os.Looper
 import android.util.Log
 import androidx.annotation.RequiresPermission
 import androidx.core.app.ActivityCompat
+import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.ktx.firestore
 import com.google.firebase.ktx.Firebase
 import kotlinx.coroutines.Dispatchers
@@ -126,7 +127,7 @@ class BLEScannerLogic {
                     bluetoothLeScanner?.stopScan(callback)
                     Log.d("BLE", "Stopped BLE scan")
                 }
-                isScanning = false
+                isScanning = false;
             }
         }
     }
@@ -177,7 +178,32 @@ class BLEScannerLogic {
             }
         }
     }
+    // Add this method to BLEScannerLogic class
+    suspend fun markDefaulterAsync(subjectName: String, studentName: String, rollNumber: String): Boolean {
+        return withContext(Dispatchers.IO) {
+            try {
+                val db = Firebase.firestore
 
+                // Get today's date in the format "dd-MM-yyyy"
+                val dateFormat = SimpleDateFormat("dd-MM-yyyy", Locale.getDefault())
+                val todayDate = dateFormat.format(Date())
+
+                // Add student to Defaulters document
+                db.collection("Subjects")
+                    .document(subjectName)
+                    .collection(todayDate)
+                    .document("Defaulters")
+                    .set(mapOf(rollNumber to studentName), SetOptions.merge())
+                    .await()
+
+                Log.d("Firestore", "Defaulter marked: $studentName ($rollNumber) in $subjectName")
+                true
+            } catch (e: Exception) {
+                Log.e("Firestore", "Error marking defaulter", e)
+                false
+            }
+        }
+    }
     // Process scan result to detect if it's from our ESP device and extract the message
     @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
     fun processScanResult(result: ScanResult): ScanResultWithText {
