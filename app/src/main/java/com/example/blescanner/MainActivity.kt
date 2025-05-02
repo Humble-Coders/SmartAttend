@@ -49,14 +49,23 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresApi
 import androidx.annotation.RequiresPermission
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetectorOptions
 import kotlinx.coroutines.*
+import java.util.concurrent.Executors
 
 
 class MainActivity : ComponentActivity() {
@@ -96,7 +105,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AuthenticatedBLEApp(bleLogic: BLEScannerLogic) {
     // Track app state
-    var appState by remember { mutableStateOf(AppState.AUTHENTICATION) }
+    var appState by remember { mutableStateOf(AppState.MAIN) } // Changed from AUTHENTICATION to MAIN
+    var showEnrollment by remember { mutableStateOf(false) }
 
     // Shared Preferences for storing user info
     val context = LocalContext.current
@@ -123,51 +133,31 @@ fun AuthenticatedBLEApp(bleLogic: BLEScannerLogic) {
         isFirstLaunch = false
     }
 
-    // Check if face is already enrolled when this composable starts
     LaunchedEffect(Unit) {
-        // Check if face is enrolled by checking shared preferences
+        // Check if face is enrolled - if not, show enrollment screen when needed
         val isFaceEnrolled = context.getSharedPreferences("face_auth", Context.MODE_PRIVATE)
             .contains("enrolled_face")
 
-        // Set initial state based on enrollment status
-        appState = if (isFaceEnrolled) {
-            AppState.AUTHENTICATION
-        } else {
-            AppState.ENROLLMENT
+        if (!isFaceEnrolled) {
+            showEnrollment = true
         }
     }
 
-    // Display the appropriate screen based on app state
-    when (appState) {
-        AppState.AUTHENTICATION -> {
-            FaceAuthenticationScreen(
-                onAuthenticationSuccess = {
-                    appState = AppState.MAIN
-                },
-                onSetupFace = {
-                    appState = AppState.ENROLLMENT
-                }
-            )
-        }
-
-        AppState.ENROLLMENT -> {
-            FaceEnrollmentScreen(
-                onEnrollmentComplete = {
-                    appState = AppState.AUTHENTICATION
-                }
-            )
-        }
-
-        AppState.MAIN -> {
-            // Pass all required parameters to the BLE Scanner app
-            BLEScannerApp(
-                bleLogic = bleLogic,
-                initialStudentName = studentName,
-                initialRollNumber = rollNumber,
-                showInitialDialog = isFirstLaunch,
-                onSaveUserInfo = saveUserInfo
-            )
-        }
+    if (showEnrollment) {
+        FaceEnrollmentScreen(
+            onEnrollmentComplete = {
+                showEnrollment = false
+            }
+        )
+    } else {
+        // Go directly to main screen without authentication
+        BLEScannerApp(
+            bleLogic = bleLogic,
+            initialStudentName = studentName,
+            initialRollNumber = rollNumber,
+            showInitialDialog = isFirstLaunch,
+            onSaveUserInfo = saveUserInfo
+        )
     }
 }
 
@@ -184,6 +174,7 @@ fun BLEScannerApp(bleLogic: BLEScannerLogic,
     var rollNumber by remember { mutableStateOf(initialRollNumber) }
     var showUserInfoDialog by remember { mutableStateOf(showInitialDialog) }
     var showAttendanceDialog by remember { mutableStateOf(false) }
+    var showAuthenticationDialog by remember { mutableStateOf(false) } // New state for authentication
     var detectedSubject by remember { mutableStateOf("") }
     var scanResults by remember { mutableStateOf<List<BLEScannerLogic.ScanResultWithText>>(emptyList()) }
     var isAttendanceMarked by remember { mutableStateOf(false) }
@@ -291,9 +282,12 @@ fun BLEScannerApp(bleLogic: BLEScannerLogic,
                         processedResult.message.isNotBlank() &&
                         !isAttendanceMarked &&
                         !isMarkingAttendance &&
-                        !showAttendanceDialog) {
+                        !showAttendanceDialog &&
+                        !showAuthenticationDialog) {
+                        // Store the detected subject
                         detectedSubject = processedResult.message
-                        showAttendanceDialog = true
+                        // Show authentication before marking attendance
+                        showAuthenticationDialog = true
                     }
                 }
             }
@@ -437,6 +431,22 @@ fun BLEScannerApp(bleLogic: BLEScannerLogic,
                 }
             )
         }
+
+        if (showAuthenticationDialog) {
+            AuthenticationDialog(
+                onAuthenticationSuccess = {
+                    showAuthenticationDialog = false
+                    showAttendanceDialog = true // Show attendance dialog after successful authentication
+                },
+                onAuthenticationFailure = {
+                    showAuthenticationDialog = false
+                    Toast.makeText(context, "Authentication failed. Please try again.", Toast.LENGTH_SHORT).show()
+                },
+                onDismiss = {
+                    showAuthenticationDialog = false
+                }
+            )
+        }
         // Auto attendance dialog - no confirmation needed
         if (showAttendanceDialog) {
             AutoAttendanceDialog(
@@ -483,6 +493,192 @@ fun BLEScannerApp(bleLogic: BLEScannerLogic,
                     }
                 }
             )
+        }
+    }
+}
+
+
+@Composable
+fun AuthenticationDialog(
+    onAuthenticationSuccess: () -> Unit,
+    onAuthenticationFailure: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var isAuthenticating by remember { mutableStateOf(false) }
+    var authStatus by remember { mutableStateOf("Looking for face...") }
+    var authAttempts by remember { mutableStateOf(0) }
+    val coroutineScope = rememberCoroutineScope()
+    val maxAttempts = 3
+
+    // Face detector setup
+    val faceDetectorOptions = remember {
+        FaceDetectorOptions.Builder()
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
+            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
+            .build()
+    }
+    val faceDetector = remember { FaceDetection.getClient(faceDetectorOptions) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier
+                .width(320.dp)
+                .height(480.dp),
+            shape = RoundedCornerShape(12.dp),
+            color = Color.White
+        ) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "Face Authentication",
+                    style = MaterialTheme.typography.headlineSmall,
+                    modifier = Modifier.padding(16.dp)
+                )
+
+                Text(
+                    text = "Verify your identity to mark attendance",
+                    fontSize = 14.sp,
+                    color = Color.Gray,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(16.dp)
+                        .background(Color(0xFFF5F5F5), shape = RoundedCornerShape(8.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    // Camera preview
+                    AndroidView(
+                        factory = { ctx ->
+                            androidx.camera.view.PreviewView(ctx).apply {
+                                implementationMode = androidx.camera.view.PreviewView.ImplementationMode.COMPATIBLE
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                        update = { previewView ->
+                            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+                            cameraProviderFuture.addListener({
+                                val cameraProvider = cameraProviderFuture.get()
+
+                                val preview = Preview.Builder().build().also {
+                                    it.setSurfaceProvider(previewView.surfaceProvider)
+                                }
+
+                                val imageAnalyzer = ImageAnalysis.Builder()
+                                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                    .build()
+                                    .also { analysis ->
+                                        analysis.setAnalyzer(
+                                            Executors.newSingleThreadExecutor(),
+                                            FaceAnalyzer(
+                                                faceDetector = faceDetector,
+                                                onFaceDetected = { face, bitmap ->
+                                                    if (!isAuthenticating) {
+                                                        isAuthenticating = true
+                                                        authStatus = "Verifying..."
+
+                                                        // Launch in coroutine scope
+                                                        coroutineScope.launch {
+                                                            try {
+                                                                // Add a small delay to avoid too rapid authentication attempts
+                                                                delay(300)
+
+                                                                // Check if this face matches the enrolled one
+                                                                val success = verifyFace(context, face, bitmap)
+                                                                Log.d("FaceAuth", "Verification result: $success")
+
+                                                                withContext(Dispatchers.Main) {
+                                                                    if (success) {
+                                                                        authStatus = "Authentication Successful!"
+                                                                        delay(1000) // Give user time to see success message
+                                                                        onAuthenticationSuccess()
+                                                                    } else {
+                                                                        authAttempts++
+                                                                        if (authAttempts >= maxAttempts) {
+                                                                            authStatus = "Too many failed attempts"
+                                                                            delay(1000)
+                                                                            onAuthenticationFailure()
+                                                                        } else {
+                                                                            authStatus = "Authentication Failed (Attempt $authAttempts/$maxAttempts)"
+                                                                            delay(1000) // Wait before trying again
+                                                                            isAuthenticating = false
+                                                                        }
+                                                                    }
+                                                                }
+                                                            } catch (e: Exception) {
+                                                                Log.e("FaceAuth", "Authentication failed", e)
+                                                                withContext(Dispatchers.Main) {
+                                                                    authStatus = "Authentication Error"
+                                                                    delay(1000) // Wait before trying again
+                                                                    isAuthenticating = false
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            )
+                                        )
+                                    }
+
+                                try {
+                                    cameraProvider.unbindAll()
+                                    cameraProvider.bindToLifecycle(
+                                        lifecycleOwner,
+                                        CameraSelector.DEFAULT_FRONT_CAMERA,
+                                        preview,
+                                        imageAnalyzer
+                                    )
+                                } catch(e: Exception) {
+                                    Log.e("FaceAuth", "Camera binding failed", e)
+                                }
+                            }, ContextCompat.getMainExecutor(context))
+                        }
+                    )
+
+                    // Show authentication status and progress
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.BottomCenter)
+                            .background(Color.Black.copy(alpha = 0.5f))
+                            .padding(8.dp)
+                    ) {
+                        Text(
+                            text = authStatus,
+                            color = Color.White,
+                            fontSize = 14.sp
+                        )
+
+                        if (isAuthenticating) {
+                            LinearProgressIndicator(
+                                modifier = Modifier
+                                    .fillMaxWidth(0.8f)
+                                    .padding(top = 8.dp)
+                            )
+                        }
+                    }
+                }
+
+                Button(
+                    onClick = onDismiss,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF1A2151)
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp)
+                ) {
+                    Text("Cancel")
+                }
+            }
         }
     }
 }

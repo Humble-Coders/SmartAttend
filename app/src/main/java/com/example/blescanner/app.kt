@@ -336,60 +336,6 @@ private suspend fun saveFaceFeatures(
     }
 }
 
-private fun extractFaceFeatures(face: Face, bitmap: Bitmap): ByteArray {
-    // Extract relevant facial features
-    val baos = ByteArrayOutputStream()
-
-    // Get all available landmarks
-    val landmarks = face.allLandmarks
-
-    // Write number of landmarks
-    baos.write(landmarks.size)
-
-    // Write each landmark position
-    landmarks.forEach { landmark ->
-        // Write the landmark type
-        baos.write(landmark.landmarkType)
-
-        // Write x and y coordinates as floats
-        val xBytes = ByteBuffer.allocate(4).putFloat(landmark.position.x).array()
-        val yBytes = ByteBuffer.allocate(4).putFloat(landmark.position.y).array()
-        baos.write(xBytes)
-        baos.write(yBytes)
-    }
-
-    // Add face bounds as floats
-    val bounds = face.boundingBox
-    val boundsData = ByteBuffer.allocate(16)
-        .putInt(bounds.left)
-        .putInt(bounds.top)
-        .putInt(bounds.right)
-        .putInt(bounds.bottom)
-        .array()
-    baos.write(boundsData)
-
-    // Add other face probabilities as floats
-    val probBuffer = ByteBuffer.allocate(12)
-
-    // Default to 0.5f if not available
-    probBuffer.putFloat(face.smilingProbability ?: 0.5f)
-    probBuffer.putFloat(face.rightEyeOpenProbability ?: 0.5f)
-    probBuffer.putFloat(face.leftEyeOpenProbability ?: 0.5f)
-
-    baos.write(probBuffer.array())
-
-    // Add head rotation if available
-    if (face.headEulerAngleX != null && face.headEulerAngleY != null && face.headEulerAngleZ != null) {
-        val rotationBuffer = ByteBuffer.allocate(12)
-            .putFloat(face.headEulerAngleX!!)
-            .putFloat(face.headEulerAngleY!!)
-            .putFloat(face.headEulerAngleZ!!)
-            .array()
-        baos.write(rotationBuffer)
-    }
-
-    return baos.toByteArray()
-}
 
 // Encryption/Decryption utilities
 private fun getOrCreateSecretKey(): SecretKey {
@@ -442,181 +388,159 @@ private fun String.decodeBase64(): ByteArray {
 }
 
 
-@Composable
-fun FaceAuthenticationScreen(
-    onAuthenticationSuccess: () -> Unit,
-    onSetupFace: () -> Unit
-) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    var isAuthenticating by remember { mutableStateOf(false) }
-    var authStatus by remember { mutableStateOf("") }
-    var authAttempts by remember { mutableStateOf(0) }
-    val coroutineScope = rememberCoroutineScope()
 
-    // Check if face is already enrolled
-    val isFaceEnrolled = remember {
-        context.getSharedPreferences("face_auth", Context.MODE_PRIVATE)
-            .contains("enrolled_face")
+
+
+// Updated face feature extraction function to focus on facial landmarks and ignore background
+private fun extractFaceFeatures(face: Face, bitmap: Bitmap): ByteArray {
+    val baos = ByteArrayOutputStream()
+
+    // Get all available landmarks
+    val landmarks = face.allLandmarks
+
+    // Write number of landmarks
+    baos.write(landmarks.size)
+
+    // Write each landmark position relative to face bounding box
+    // This normalizes positions to be independent of exact face position in the frame
+    val bounds = face.boundingBox
+    val faceWidth = bounds.width().toFloat()
+    val faceHeight = bounds.height().toFloat()
+    val faceCenterX = bounds.centerX()
+    val faceCenterY = bounds.centerY()
+
+    landmarks.forEach { landmark ->
+        // Write the landmark type
+        baos.write(landmark.landmarkType)
+
+        // Write NORMALIZED x and y coordinates as floats
+        // This makes positions relative to face center and size
+        val normalizedX = (landmark.position.x - faceCenterX) / faceWidth
+        val normalizedY = (landmark.position.y - faceCenterY) / faceHeight
+
+        val xBytes = ByteBuffer.allocate(4).putFloat(normalizedX).array()
+        val yBytes = ByteBuffer.allocate(4).putFloat(normalizedY).array()
+        baos.write(xBytes)
+        baos.write(yBytes)
     }
 
-    // Face detector setup
-    val faceDetectorOptions = remember {
-        FaceDetectorOptions.Builder()
-            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
-            .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_ALL)
-            .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_ALL)
-            .build()
+    // Face dimensions ratio - this is invariant to distance from camera
+    val faceAspectRatio = faceWidth / faceHeight
+    val ratioBytes = ByteBuffer.allocate(4).putFloat(faceAspectRatio).array()
+    baos.write(ratioBytes)
+
+    // Add other face probabilities as floats
+    val probBuffer = ByteBuffer.allocate(12)
+    probBuffer.putFloat(face.smilingProbability ?: 0.5f)
+    probBuffer.putFloat(face.rightEyeOpenProbability ?: 0.5f)
+    probBuffer.putFloat(face.leftEyeOpenProbability ?: 0.5f)
+    baos.write(probBuffer.array())
+
+    // Add normalized head rotation if available
+    if (face.headEulerAngleX != null && face.headEulerAngleY != null && face.headEulerAngleZ != null) {
+        val rotationBuffer = ByteBuffer.allocate(12)
+            .putFloat(face.headEulerAngleX!!)
+            .putFloat(face.headEulerAngleY!!)
+            .putFloat(face.headEulerAngleZ!!)
+            .array()
+        baos.write(rotationBuffer)
     }
-    val faceDetector = remember { FaceDetection.getClient(faceDetectorOptions) }
 
-    Column(
-        modifier = Modifier.fillMaxSize(),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        if (!isFaceEnrolled) {
-            Text(
-                "No face registered",
-                style = MaterialTheme.typography.headlineMedium,
-                modifier = Modifier.padding(16.dp)
-            )
-            Text(
-                "You need to enroll a face to use face authentication",
-                modifier = Modifier.padding(16.dp)
-            )
-            Button(
-                onClick = onSetupFace,
-                modifier = Modifier.padding(16.dp)
-            ) {
-                Text("Enroll Face")
-            }
-        } else {
-            Text(
-                "Face Authentication",
-                style = MaterialTheme.typography.headlineMedium,
-                modifier = Modifier.padding(16.dp)
-            )
+    return baos.toByteArray()
+}
 
-            if (authStatus.isNotEmpty()) {
-                Text(
-                    authStatus,
-                    color = if (authStatus.contains("Success"))
-                        MaterialTheme.colorScheme.primary else
-                        MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(16.dp)
-                )
-            }
+// Improved similarity calculation function
+private fun calculateSimilarity(features1: ByteArray, features2: ByteArray): Double {
+    try {
+        // Read landmark counts from the beginning of each feature array
+        val landmarkCount1 = features1[0].toInt() and 0xFF
+        val landmarkCount2 = features2[0].toInt() and 0xFF
 
-            Box(modifier = Modifier.weight(1f)) {
-                // Camera preview
-                AndroidView(
-                    factory = { ctx ->
-                        androidx.camera.view.PreviewView(ctx).apply {
-                            implementationMode = androidx.camera.view.PreviewView.ImplementationMode.COMPATIBLE
-                        }
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                    update = { previewView ->
-                        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-                        cameraProviderFuture.addListener({
-                            val cameraProvider = cameraProviderFuture.get()
+        // Calculate the number of matching landmarks
+        var matchingLandmarks = 0.0
+        var comparedLandmarks = 0
 
-                            val preview = Preview.Builder().build().also {
-                                it.setSurfaceProvider(previewView.surfaceProvider)
-                            }
+        // Minimum number of landmarks to compare
+        val minLandmarks = minOf(landmarkCount1, landmarkCount2)
 
-                            val imageAnalyzer = ImageAnalysis.Builder()
-                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                                .build()
-                                .also { analysis ->
-                                    analysis.setAnalyzer(
-                                        Executors.newSingleThreadExecutor(),
-                                        FaceAnalyzer(
-                                            faceDetector = faceDetector,
-                                            onFaceDetected = { face, bitmap ->
-                                                if (!isAuthenticating) {
-                                                    isAuthenticating = true
-                                                    authStatus = "Processing..."
+        // Offset for the first landmark
+        var offset1 = 1
+        var offset2 = 1
 
-                                                    // Launch in coroutine scope
-                                                    coroutineScope.launch {
-                                                        try {
-                                                            // Add a small delay to avoid too rapid authentication attempts
-                                                            delay(300)
+        // Map to hold landmark comparisons by type
+        val landmarkTypeMap = mutableMapOf<Int, Pair<Pair<Float, Float>, Pair<Float, Float>>>()
 
-                                                            // Check if this face matches the enrolled one
-                                                            val success = verifyFace(context, face, bitmap)
-                                                            Log.d("FaceAuth", "Verification result: $success")
-
-                                                            withContext(Dispatchers.Main) {
-                                                                if (success) {
-                                                                    authStatus =
-                                                                        "Authentication Successful!"
-                                                                    delay(1000) // Give user time to see success message
-                                                                    onAuthenticationSuccess()
-                                                                } else {
-                                                                    authAttempts++
-                                                                    authStatus =
-                                                                        "Authentication Failed (Attempt $authAttempts)"
-                                                                    delay(1000) // Wait before trying again
-                                                                    isAuthenticating = false
-                                                                }
-                                                            }
-                                                        } catch (e: Exception) {
-                                                            Log.e("FaceAuth", "Authentication failed", e)
-                                                            withContext(Dispatchers.Main) {
-                                                                authStatus =
-                                                                    "Authentication Error: ${e.localizedMessage}"
-                                                                delay(1000) // Wait before trying again
-                                                                isAuthenticating = false
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        )
-                                    )
-                                }
-
-                            try {
-                                cameraProvider.unbindAll()
-                                cameraProvider.bindToLifecycle(
-                                    lifecycleOwner,
-                                    CameraSelector.DEFAULT_FRONT_CAMERA,
-                                    preview,
-                                    imageAnalyzer
-                                )
-                            } catch(e: Exception) {
-                                Log.e("FaceAuth", "Camera binding failed", e)
-                            }
-                        }, ContextCompat.getMainExecutor(context))
-                    }
-                )
-
-                if (isAuthenticating) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.align(Alignment.Center)
-                    )
-                }
-            }
-
-            Text(
-                "Look at the camera to authenticate",
-                modifier = Modifier.padding(16.dp)
-            )
-
-            Button(
-                onClick = onSetupFace,
-                modifier = Modifier.padding(bottom = 16.dp)
-            ) {
-                Text("Re-enroll Face")
-            }
+        // First pass - collect landmarks by type
+        for (i in 0 until landmarkCount1) {
+            val type1 = features1[offset1].toInt() and 0xFF
+            val x1 = ByteBuffer.wrap(features1, offset1 + 1, 4).float
+            val y1 = ByteBuffer.wrap(features1, offset1 + 5, 4).float
+            landmarkTypeMap[type1] = Pair(Pair(x1, y1), Pair(0f, 0f))
+            offset1 += 9
         }
+
+        // Second pass - find matching landmark types
+        offset2 = 1
+        for (i in 0 until landmarkCount2) {
+            val type2 = features2[offset2].toInt() and 0xFF
+
+            if (landmarkTypeMap.containsKey(type2)) {
+                val x2 = ByteBuffer.wrap(features2, offset2 + 1, 4).float
+                val y2 = ByteBuffer.wrap(features2, offset2 + 5, 4).float
+                val pair = landmarkTypeMap[type2]!!
+                landmarkTypeMap[type2] = Pair(pair.first, Pair(x2, y2))
+            }
+
+            offset2 += 9
+        }
+
+        // Calculate similarity based on relative distances between landmarks
+        // This approach is more tolerant to slight head rotation and position changes
+        for ((_, positions) in landmarkTypeMap) {
+            val (pos1, pos2) = positions
+
+            // Skip if we don't have a match for this landmark type
+            if (pos2.first == 0f && pos2.second == 0f) continue
+
+            // Calculate Euclidean distance between normalized points
+            val distance = Math.sqrt(
+                Math.pow((pos1.first - pos2.first).toDouble(), 2.0) +
+                        Math.pow((pos1.second - pos2.second).toDouble(), 2.0)
+            )
+
+            // Normalized positions should be very close if it's the same person
+            // The threshold is much lower (0.2) since we're using normalized coordinates
+            if (distance < 0.2) {
+                matchingLandmarks += 1.0 - (distance / 0.2) // Weight by proximity
+            }
+
+            comparedLandmarks++
+        }
+
+        // Compare face aspect ratios (should be similar for same person)
+        // Get offset where aspect ratio is stored (after all landmarks)
+        val ratioOffset1 = 1 + (landmarkCount1 * 9)
+        val ratioOffset2 = 1 + (landmarkCount2 * 9)
+
+        val ratio1 = ByteBuffer.wrap(features1, ratioOffset1, 4).float
+        val ratio2 = ByteBuffer.wrap(features2, ratioOffset2, 4).float
+
+        val ratioDiff = Math.abs(ratio1 - ratio2)
+        val ratioScore = if (ratioDiff < 0.2) (1.0 - (ratioDiff / 0.2)) else 0.0
+
+        // Calculate final similarity score with weighted components
+        val landmarkScore = if (comparedLandmarks > 0) matchingLandmarks / comparedLandmarks else 0.0
+
+        // Final score combines landmark matching (80%) and face ratio (20%)
+        return (landmarkScore * 0.8) + (ratioScore * 0.2)
+    } catch (e: Exception) {
+        Log.e("FaceAuth", "Error calculating similarity", e)
+        return 0.0
     }
 }
 
-
-private suspend fun verifyFace(
+// Updated verification function with adaptive threshold
+internal suspend fun verifyFace(
     context: Context,
     face: Face,
     bitmap: Bitmap
@@ -637,11 +561,12 @@ private suspend fun verifyFace(
             // Decrypt stored features
             val storedFeatures = decryptData(encryptedFeatures, key)
 
-            // Compare features
+            // Compare features with adaptive threshold
             val similarity = calculateSimilarity(currentFaceFeatures, storedFeatures)
             Log.d("FaceAuth", "Face similarity: $similarity")
 
-            similarity >= 0.40 // Lower threshold for better matching
+            // Use a lower threshold (0.35) for better matching in varied environments
+            similarity >= 0.35
         } catch (e: Exception) {
             Log.e("FaceAuth", "Face verification failed", e)
             false
@@ -667,62 +592,3 @@ private fun decryptData(encryptedData: ByteArray, key: SecretKey): ByteArray {
     }
 }
 
-private fun calculateSimilarity(features1: ByteArray, features2: ByteArray): Double {
-    try {
-        // Read landmark counts from the beginning of each feature array
-        val landmarkCount1 = features1[0].toInt() and 0xFF
-        val landmarkCount2 = features2[0].toInt() and 0xFF
-
-        // Calculate the number of matching landmarks
-        var matchingLandmarks = 0.0
-        var comparedLandmarks = 0
-
-        // Minimum number of landmarks to compare
-        val minLandmarks = minOf(landmarkCount1, landmarkCount2)
-
-        // Offset for the first landmark
-        var offset1 = 1
-        var offset2 = 1
-
-        // Compare landmarks
-        for (i in 0 until minLandmarks) {
-            // Extract landmark type
-            val type1 = features1[offset1].toInt() and 0xFF
-            val type2 = features2[offset2].toInt() and 0xFF
-
-            // Skip this comparison if types don't match
-            if (type1 == type2) {
-                // Extract x, y coordinates
-                val x1 = ByteBuffer.wrap(features1, offset1 + 1, 4).float
-                val y1 = ByteBuffer.wrap(features1, offset1 + 5, 4).float
-                val x2 = ByteBuffer.wrap(features2, offset2 + 1, 4).float
-                val y2 = ByteBuffer.wrap(features2, offset2 + 5, 4).float
-
-                // Calculate distance between points
-                val distance = Math.sqrt(Math.pow((x1 - x2).toDouble(), 2.0) +
-                        Math.pow((y1 - y2).toDouble(), 2.0))
-
-                // If distance is under threshold, count as a match
-                if (distance < 50.0) {
-                    matchingLandmarks += 1.0 - (distance / 50.0) // Weight by proximity
-                }
-
-                comparedLandmarks++
-            }
-
-            // Move to next landmark
-            offset1 += 9  // type(1) + x(4) + y(4)
-            offset2 += 9
-        }
-
-        // Calculate final similarity score
-        return if (comparedLandmarks > 0) {
-            matchingLandmarks / comparedLandmarks
-        } else {
-            0.0 // No landmarks compared
-        }
-    } catch (e: Exception) {
-        Log.e("FaceAuth", "Error calculating similarity", e)
-        return 0.0
-    }
-}
