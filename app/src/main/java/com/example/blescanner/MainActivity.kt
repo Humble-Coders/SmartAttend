@@ -77,37 +77,97 @@ class MainActivity : ComponentActivity() {
         // Initialize BLE components
         bleLogic.initialize(this)
 
-        // Get stored user info - ADD THIS BLOCK
-        val sharedPreferences = getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        val savedName = sharedPreferences.getString(KEY_STUDENT_NAME, "")
-        val savedRollNumber = sharedPreferences.getString(KEY_ROLL_NUMBER, "")
-        val isFirstLaunch = sharedPreferences.getBoolean(KEY_FIRST_LAUNCH, true)
-
         setContent {
-            // REPLACE this line
-            BLEScannerApp(
-                bleLogic = bleLogic,
-                initialStudentName = savedName ?: "",
-                initialRollNumber = savedRollNumber ?: "",
-                showInitialDialog = isFirstLaunch || savedName.isNullOrEmpty(),
-                onSaveUserInfo = { name, roll ->
-                    // Save user info to SharedPreferences
-                    sharedPreferences.edit()
-                        .putString(KEY_STUDENT_NAME, name)
-                        .putString(KEY_ROLL_NUMBER, roll)
-                        .putBoolean(KEY_FIRST_LAUNCH, false)
-                        .apply()
-                }
-            )
+            // Wrap your BLE app with authentication
+            AuthenticatedBLEApp(bleLogic)
         }
     }
-
     @RequiresPermission(Manifest.permission.BLUETOOTH_SCAN)
     override fun onDestroy() {
         super.onDestroy()
         bleLogic.cleanup()
         scanJob?.cancel()
         attendanceJob?.cancel()
+    }
+}
+
+
+@RequiresApi(Build.VERSION_CODES.O)
+@Composable
+fun AuthenticatedBLEApp(bleLogic: BLEScannerLogic) {
+    // Track app state
+    var appState by remember { mutableStateOf(AppState.AUTHENTICATION) }
+
+    // Shared Preferences for storing user info
+    val context = LocalContext.current
+    val sharedPrefs = remember { context.getSharedPreferences("user_info", Context.MODE_PRIVATE) }
+
+    // Get the stored user info or use defaults
+    val savedName = remember { sharedPrefs.getString("studentName", "Alex Johnson") ?: "Alex Johnson" }
+    val savedRoll = remember { sharedPrefs.getString("rollNumber", "20230045") ?: "20230045" }
+    var studentName by remember { mutableStateOf(savedName) }
+    var rollNumber by remember { mutableStateOf(savedRoll) }
+
+    // Check if first launch (for showing initial dialog)
+    var isFirstLaunch by remember { mutableStateOf(sharedPrefs.getBoolean("isFirstLaunch", true)) }
+
+    // Function to save user info
+    val saveUserInfo: (String, String) -> Unit = { name, roll ->
+        studentName = name
+        rollNumber = roll
+        sharedPrefs.edit()
+            .putString("studentName", name)
+            .putString("rollNumber", roll)
+            .putBoolean("isFirstLaunch", false)
+            .apply()
+        isFirstLaunch = false
+    }
+
+    // Check if face is already enrolled when this composable starts
+    LaunchedEffect(Unit) {
+        // Check if face is enrolled by checking shared preferences
+        val isFaceEnrolled = context.getSharedPreferences("face_auth", Context.MODE_PRIVATE)
+            .contains("enrolled_face")
+
+        // Set initial state based on enrollment status
+        appState = if (isFaceEnrolled) {
+            AppState.AUTHENTICATION
+        } else {
+            AppState.ENROLLMENT
+        }
+    }
+
+    // Display the appropriate screen based on app state
+    when (appState) {
+        AppState.AUTHENTICATION -> {
+            FaceAuthenticationScreen(
+                onAuthenticationSuccess = {
+                    appState = AppState.MAIN
+                },
+                onSetupFace = {
+                    appState = AppState.ENROLLMENT
+                }
+            )
+        }
+
+        AppState.ENROLLMENT -> {
+            FaceEnrollmentScreen(
+                onEnrollmentComplete = {
+                    appState = AppState.AUTHENTICATION
+                }
+            )
+        }
+
+        AppState.MAIN -> {
+            // Pass all required parameters to the BLE Scanner app
+            BLEScannerApp(
+                bleLogic = bleLogic,
+                initialStudentName = studentName,
+                initialRollNumber = rollNumber,
+                showInitialDialog = isFirstLaunch,
+                onSaveUserInfo = saveUserInfo
+            )
+        }
     }
 }
 
@@ -172,24 +232,26 @@ fun BLEScannerApp(bleLogic: BLEScannerLogic,
         if (allGranted) {
             hasPermissions = true
         } else {
-            Toast.makeText(context, "Permissions are required for BLE scanning", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, "All permissions are required for this app", Toast.LENGTH_LONG).show()
             hasPermissions = false
         }
     }
 
-    // Check and request permissions
+// Check and request permissions
     LaunchedEffect(Unit) {
         val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             listOf(
                 Manifest.permission.BLUETOOTH_SCAN,
                 Manifest.permission.BLUETOOTH_CONNECT,
-                Manifest.permission.ACCESS_FINE_LOCATION
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.CAMERA  // For face authentication
             )
         } else {
             listOf(
                 Manifest.permission.BLUETOOTH,
                 Manifest.permission.BLUETOOTH_ADMIN,
-                Manifest.permission.ACCESS_FINE_LOCATION
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.CAMERA  // For face authentication
             )
         }
 
@@ -580,6 +642,10 @@ fun DeviceList(
     }
 }
 
+
+
+
+// Copy this from your FaceHope app to ensure compatibility
 
 
 @Composable
